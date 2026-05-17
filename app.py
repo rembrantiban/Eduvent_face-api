@@ -7,12 +7,19 @@ from extensions import limiter
 
 app = Flask(__name__)
 
-
 limiter.init_app(app)
-
 
 app.register_blueprint(enroll_bp)
 app.register_blueprint(recognize_bp)
+
+
+@app.route("/")
+def home():
+
+    return jsonify({
+        "success": True,
+        "message": "Eduvent Face API Running"
+    })
 
 @app.errorhandler(429)
 def ratelimit_handler(e):
