@@ -6,7 +6,9 @@ import numpy as np
 import base64
 import uuid
 import json
+
 from extensions import limiter
+
 import cloudinary.uploader
 
 from cloudinary_config import *
@@ -21,8 +23,28 @@ enroll_bp = Blueprint(
     __name__
 )
 
+# =========================
+# STORAGE PATHS
+# =========================
+STORAGE_DIR = "storage"
+
+FACES_DIR = os.path.join(
+    STORAGE_DIR,
+    "faces"
+)
+
+MODEL_PATH = os.path.join(
+    STORAGE_DIR,
+    "trainer.yml"
+)
+
+LABELS_PATH = os.path.join(
+    STORAGE_DIR,
+    "labels.json"
+)
+
 os.makedirs(
-    "faces",
+    FACES_DIR,
     exist_ok=True
 )
 
@@ -41,10 +63,12 @@ def train_model():
 
     current_label = 0
 
-    for usn in os.listdir("faces"):
+    for usn in os.listdir(
+        FACES_DIR
+    ):
 
         folder = os.path.join(
-            "faces",
+            FACES_DIR,
             usn
         )
 
@@ -105,14 +129,18 @@ def train_model():
         np.array(labels)
     )
 
+    # =========================
     # SAVE MODEL
+    # =========================
     recognizer.save(
-        "trainer.yml"
+        MODEL_PATH
     )
 
+    # =========================
     # SAVE LABEL MAP
+    # =========================
     with open(
-        "labels.json",
+        LABELS_PATH,
         "w"
     ) as f:
 
@@ -146,10 +174,12 @@ def find_existing_face_owner(
 
         current_label = 0
 
-        for usn in os.listdir("faces"):
+        for usn in os.listdir(
+            FACES_DIR
+        ):
 
             folder = os.path.join(
-                "faces",
+                FACES_DIR,
                 usn
             )
 
@@ -231,8 +261,9 @@ def find_existing_face_owner(
     "/enroll",
     methods=["POST"]
 )
-@limiter.limit("10 per hour")
+@limiter.limit("5 per minute")
 def enroll_person():
+
     try:
 
         data = request.json
@@ -268,10 +299,24 @@ def enroll_person():
             }), 404
 
         # =========================
+        # CHECK FACE ALREADY REGISTERED
+        # =========================
+        if existing_user.get(
+            "isFaceRegistered",
+            False
+        ):
+
+            return jsonify({
+                "success": False,
+                "message":
+                "Student already face registered"
+            }), 400
+
+        # =========================
         # CREATE FOLDER
         # =========================
         folder = os.path.join(
-            "faces",
+            FACES_DIR,
             usn
         )
 
@@ -342,18 +387,24 @@ def enroll_person():
 
                 continue
 
+            # =========================
             # FIX MIRROR
+            # =========================
             img_np = cv2.flip(
                 img_np,
                 1
             )
 
+            # =========================
             # LIGHTING NORMALIZATION
+            # =========================
             img_np = cv2.equalizeHist(
                 img_np
             )
 
+            # =========================
             # FACE DETECTION
+            # =========================
             detected_faces = (
                 face_cascade.detectMultiScale(
                     img_np,
@@ -377,7 +428,9 @@ def enroll_person():
 
                 continue
 
+            # =========================
             # GET LARGEST FACE
+            # =========================
             (x, y, w, h) = max(
                 detected_faces,
                 key=lambda face:
@@ -389,25 +442,33 @@ def enroll_person():
                 x:x+w
             ]
 
+            # =========================
             # RESIZE
+            # =========================
             face = cv2.resize(
                 face,
                 (200, 200)
             )
 
+            # =========================
             # NORMALIZE
+            # =========================
             face = cv2.equalizeHist(
                 face
             )
 
+            # =========================
             # REDUCE NOISE
+            # =========================
             face = cv2.GaussianBlur(
                 face,
                 (3, 3),
                 0
             )
 
+            # =========================
             # BLUR CHECK
+            # =========================
             blur_value = cv2.Laplacian(
                 face,
                 cv2.CV_64F
@@ -427,7 +488,9 @@ def enroll_person():
 
                 continue
 
+            # =========================
             # CHECK DUPLICATE FACE
+            # =========================
             existing_owner = (
                 find_existing_face_owner(
                     face
@@ -449,7 +512,9 @@ def enroll_person():
                     f"Face already registered by {existing_owner}"
                 }), 400
 
+            # =========================
             # SAVE FACE
+            # =========================
             filename = os.path.join(
                 folder,
                 f"{usn}_{index+1}.jpg"
@@ -577,7 +642,9 @@ def enroll_person():
             upsert=True
         )
 
+        # =========================
         # UPDATE USER
+        # =========================
         users_collection.update_one(
             {
                 "_id":

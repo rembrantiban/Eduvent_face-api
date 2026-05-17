@@ -4,13 +4,33 @@ import numpy as np
 import os
 import base64
 import json
-from extensions import limiter
 
+from extensions import limiter
 from database import users_collection
 
 recognize_bp = Blueprint(
     "recognize",
     __name__
+)
+
+# =========================
+# STORAGE PATHS
+# =========================
+STORAGE_DIR = "storage"
+
+FACES_DIR = os.path.join(
+    STORAGE_DIR,
+    "faces"
+)
+
+MODEL_PATH = os.path.join(
+    STORAGE_DIR,
+    "trainer.yml"
+)
+
+LABELS_PATH = os.path.join(
+    STORAGE_DIR,
+    "labels.json"
 )
 
 # =========================
@@ -28,7 +48,7 @@ RECOGNITION_THRESHOLD = 110
 def load_model():
 
     if not os.path.exists(
-        "trainer.yml"
+        MODEL_PATH
     ):
 
         raise Exception(
@@ -36,7 +56,7 @@ def load_model():
         )
 
     if not os.path.exists(
-        "labels.json"
+        LABELS_PATH
     ):
 
         raise Exception(
@@ -48,11 +68,11 @@ def load_model():
     )
 
     recognizer.read(
-        "trainer.yml"
+        MODEL_PATH
     )
 
     with open(
-        "labels.json",
+        LABELS_PATH,
         "r"
     ) as f:
 
@@ -84,7 +104,7 @@ def load_model():
     "/recognize",
     methods=["POST"]
 )
-@limiter.limit("20 per hour")
+@limiter.limit("10 per minute")
 def recognize():
 
     print(
