@@ -509,7 +509,7 @@ def enroll_person():
                 return jsonify({
                     "success": False,
                     "message":
-                    f"Face already registered by {existing_owner}"
+                    f"Face already registered by another user"
                 }), 400
 
             # =========================
