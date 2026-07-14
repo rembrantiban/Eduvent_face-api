@@ -6,7 +6,7 @@ import numpy as np
 import base64
 import uuid
 import json
-
+import re
 from extensions import limiter
 
 import cloudinary.uploader
@@ -286,25 +286,36 @@ def enroll_person():
                 "USN or images missing"
             }), 400
 
-        usn = str(
-            usn
-        ).strip().lower()
+        usn = str(usn).strip()
 
         print("================================")
         print("Searching studentId:", repr(usn))
 
 
-        existing_user = (
-            users_collection.find_one({
-                "studentId": usn
-            })
-        )
+        existing_user = users_collection.find_one({
+            "studentId": {
+                "$regex": f"^{re.escape(usn)}$",
+                "$options": "i"
+            }
+        })
 
         
         print("Found user:", existing_user)
         print("================================")
-
         
+        print("Incoming studentId:", repr(usn))
+
+        print("Existing student IDs:")
+
+        for user in users_collection.find(
+            {},
+            {
+                "studentId": 1,
+                "_id": 0
+            }
+        ):
+            print(user)
+                
 
         if not existing_user:
 
