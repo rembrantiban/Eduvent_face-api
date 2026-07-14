@@ -268,6 +268,12 @@ def enroll_person():
 
         data = request.json
 
+        print("=================================")
+        print("REQUEST DATA:", data)
+        print("USN RECEIVED:", data.get("usn"))
+        print("=================================")
+
+
         usn = data.get("usn")
 
         images = data.get("images")
@@ -284,11 +290,20 @@ def enroll_person():
             usn
         ).strip().lower()
 
+        print("================================")
+        print("Searching studentId:", repr(usn))
+
+
         existing_user = (
             users_collection.find_one({
                 "studentId": usn
             })
         )
+
+        
+        print("Found user:", existing_user)
+        print("================================")
+
         
 
         if not existing_user:
