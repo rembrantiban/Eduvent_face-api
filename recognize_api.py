@@ -38,8 +38,11 @@ LABELS_PATH = os.path.join(
 # =========================
 FACE_SIZE = (200, 200)
 
-# LOWER = BETTER
-RECOGNITION_THRESHOLD = 110
+# LOWER = BETTER (LBPH distance). 110 accepted almost any face;
+# ~50-80 is a strict match. Tune with FACE_THRESHOLD if genuine users are rejected.
+RECOGNITION_THRESHOLD = float(
+    os.environ.get("FACE_THRESHOLD", 70)
+)
 
 
 # =========================
@@ -115,6 +118,10 @@ def recognize():
     data = request.json
 
     image_data = data.get("image")
+
+    expected_usn = str(
+        data.get("expectedUsn") or ""
+    ).strip().lower()
 
     if not image_data:
 
@@ -318,6 +325,22 @@ def recognize():
     predicted_usn = str(
         label_map[label]
     ).strip().lower()
+
+    # =========================
+    # MUST BE THE ACCOUNT OWNER
+    # =========================
+    if expected_usn and predicted_usn != expected_usn:
+
+        print(
+            f"[IDENTITY MISMATCH] predicted={predicted_usn} expected={expected_usn}",
+            flush=True
+        )
+
+        return jsonify({
+            "success": False,
+            "message":
+            "Face does not match the registered face of this account"
+        }), 403
 
     # =========================
     # CHECK USER IN DATABASE
