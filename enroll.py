@@ -21,6 +21,13 @@ from database import (
 
 from face_validation import validate_capture
 
+from face_embedding import (
+    decode_color,
+    embed,
+    similarity,
+    SAME_PERSON_THRESHOLD
+)
+
 enroll_bp = Blueprint(
     "enroll",
     __name__
@@ -57,9 +64,6 @@ REQUIRED_POSES = [
     "left",
     "right",
 ]
-
-# LBPH distance. LOWER = more similar.
-DUPLICATE_CONFIDENCE = 55
 
 # How many of the three captures must match the same
 # other student before we call it a duplicate
@@ -212,63 +216,69 @@ def train_model():
 # =====================================================
 # FIND EXISTING FACE OWNER
 #
-# Now checks ALL captures against every OTHER student,
-# and trains once instead of once per image.
+# Compares the new SFace embeddings against every OTHER
+# student's embeddings stored in MongoDB. The database
+# survives redeploys, unlike storage/faces.
 #
-# A single frame matching is not enough - at least
-# DUPLICATE_MIN_MATCHES of the three must point at the
-# same student before enrollment is rejected.
+# A capture matches a student when its best similarity
+# against that student's embeddings reaches
+# SAME_PERSON_THRESHOLD. At least DUPLICATE_MIN_MATCHES
+# of the three must point at the same student.
+#
+# Errors are NOT swallowed here - the old version
+# returned None on any exception, which silently let
+# duplicates through.
 # =====================================================
-def find_existing_face_owner(faces, exclude=None):
+def find_existing_face_owner(embeddings, exclude_user_id=None):
 
-    try:
+    votes = {}
 
-        recognizer, label_map = build_recognizer(exclude=exclude)
+    others = face_users_collection.find(
+        {
+            "userId": {"$ne": exclude_user_id},
+            "embeddings.0": {"$exists": True}
+        },
+        {
+            "studentId": 1,
+            "embeddings": 1
+        }
+    )
 
-        # Nobody else enrolled yet
-        if recognizer is None:
-            return None
+    for other in others:
 
-        votes = {}
+        owner = other.get("studentId")
 
-        for face in faces:
+        for embedding in embeddings:
 
-            label, confidence = recognizer.predict(face)
+            best = max(
+                similarity(embedding, stored)
+                for stored in other["embeddings"]
+            )
 
             print(
-                f"[FACE CHECK CONFIDENCE] {round(confidence, 1)}",
+                f"[FACE CHECK] {owner} similarity={round(best, 3)}",
                 flush=True
             )
 
-            # LOWER = BETTER
-            if confidence < DUPLICATE_CONFIDENCE:
+            # HIGHER = BETTER
+            if best >= SAME_PERSON_THRESHOLD:
+                votes[owner] = votes.get(owner, 0) + 1
 
-                owner = label_map.get(label)
-
-                if owner:
-                    votes[owner] = votes.get(owner, 0) + 1
-
-        if not votes:
-            return None
-
-        owner, count = max(votes.items(), key=lambda kv: kv[1])
-
-        if count >= DUPLICATE_MIN_MATCHES:
-
-            print(
-                f"[DUPLICATE] {owner} matched {count}/{len(faces)} captures",
-                flush=True
-            )
-
-            return owner
-
+    if not votes:
         return None
 
-    except Exception as e:
+    owner, count = max(votes.items(), key=lambda kv: kv[1])
 
-        print(f"[FACE CHECK ERROR] {str(e)}", flush=True)
+    if count >= DUPLICATE_MIN_MATCHES:
 
-        return None
+        print(
+            f"[DUPLICATE] {owner} matched {count}/{len(embeddings)} captures",
+            flush=True
+        )
+
+        return owner
+
+    return None
 
 
 # =====================================================
@@ -323,7 +333,8 @@ def save_database(
     face_url,
     cloudinary_id,
     captures,
-    quality
+    quality,
+    embeddings
 ):
 
     user_id = str(existing_user["_id"])
@@ -357,6 +368,7 @@ def save_database(
             "cloudinaryId": cloudinary_id,
             "captures": captures,
             "quality": quality,
+            "embeddings": embeddings,
             "registeredAt": datetime.utcnow(),
             "modelVersion": MODEL_VERSION,
         },
@@ -467,6 +479,7 @@ def enroll_person():
         # hurts recognition later.
         # =========================
         faces = []
+        embeddings = []
         captures = {}
         quality = {}
 
@@ -484,7 +497,17 @@ def enroll_person():
                     400
                 )
 
+            embedding = embed(decode_color(image_data))
+
+            if embedding is None:
+                return fail(
+                    f"{pose.capitalize()} capture: could not read "
+                    "facial features. Please try again.",
+                    400
+                )
+
             faces.append(result["face"])
+            embeddings.append(embedding)
             quality[pose] = result["quality"]
 
         # =========================
@@ -496,8 +519,8 @@ def enroll_person():
         print("Checking for duplicates...", flush=True)
 
         existing_owner = find_existing_face_owner(
-            faces,
-            exclude=usn
+            embeddings,
+            exclude_user_id=str(existing_user["_id"])
         )
 
         if existing_owner and existing_owner != usn:
@@ -550,7 +573,8 @@ def enroll_person():
             face_url,
             cloudinary_id,
             captures,
-            quality
+            quality,
+            embeddings
         )
 
         log_line()

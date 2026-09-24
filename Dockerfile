@@ -17,6 +17,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# Fetch YuNet + SFace models at build time, not per request
+RUN python -c "from face_embedding import download_models; download_models()"
+
 EXPOSE 8080
 
 CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:8080"]

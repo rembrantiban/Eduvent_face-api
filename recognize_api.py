@@ -1,12 +1,20 @@
 from flask import Blueprint, request, jsonify
 import cv2
-import numpy as np
 import os
-import base64
-import json
+import re
 
 from extensions import limiter
-from database import users_collection
+from database import (
+    users_collection,
+    face_users_collection
+)
+
+from face_embedding import (
+    decode_color,
+    detect_and_embed,
+    similarity,
+    SAME_PERSON_THRESHOLD
+)
 
 recognize_bp = Blueprint(
     "recognize",
@@ -14,94 +22,82 @@ recognize_bp = Blueprint(
 )
 
 # =========================
-# STORAGE PATHS
-# =========================
-STORAGE_DIR = "storage"
-
-FACES_DIR = os.path.join(
-    STORAGE_DIR,
-    "faces"
-)
-
-MODEL_PATH = os.path.join(
-    STORAGE_DIR,
-    "trainer.yml"
-)
-
-LABELS_PATH = os.path.join(
-    STORAGE_DIR,
-    "labels.json"
-)
-
-# =========================
 # SETTINGS
 # =========================
-FACE_SIZE = (200, 200)
 
-# LOWER = BETTER (LBPH distance). 110 accepted almost any face;
-# ~50-80 is a strict match. Tune with FACE_THRESHOLD if genuine users are rejected.
-RECOGNITION_THRESHOLD = float(
-    os.environ.get("FACE_THRESHOLD", 70)
+# Laplacian variance of the face crop. Lower = blurrier.
+MIN_BLUR = float(
+    os.environ.get("FACE_MIN_BLUR", 40)
 )
 
 
 # =========================
-# LOAD MODEL
+# FIND FACE USER
 # =========================
-def load_model():
+def find_face_user(usn):
 
-    if not os.path.exists(
-        MODEL_PATH
+    return face_users_collection.find_one(
+        {
+            "studentId": {
+                "$regex": f"^{re.escape(usn)}$",
+                "$options": "i"
+            },
+            "embeddings.0": {"$exists": True}
+        },
+        {
+            "studentId": 1,
+            "embeddings": 1
+        }
+    )
+
+
+# =========================
+# BEST MATCH FOR ONE STUDENT
+#
+# Highest similarity between the probe and any of the
+# student's stored embeddings (front / left / right).
+# =========================
+def best_similarity(probe, face_user):
+
+    return max(
+        similarity(probe, stored)
+        for stored in face_user["embeddings"]
+    )
+
+
+# =========================
+# SEARCH ALL STUDENTS
+#
+# Only used when the caller does not say who the
+# student should be. Returns (studentId, similarity).
+# =========================
+def search_all(probe):
+
+    best_usn = None
+    best_score = -1.0
+
+    for face_user in face_users_collection.find(
+        {"embeddings.0": {"$exists": True}},
+        {"studentId": 1, "embeddings": 1}
     ):
 
-        raise Exception(
-            "Trainer model not found"
-        )
+        score = best_similarity(probe, face_user)
 
-    if not os.path.exists(
-        LABELS_PATH
-    ):
+        if score > best_score:
+            best_usn = face_user.get("studentId")
+            best_score = score
 
-        raise Exception(
-            "Labels file not found"
-        )
-
-    recognizer = (
-        cv2.face.LBPHFaceRecognizer_create()
-    )
-
-    recognizer.read(
-        MODEL_PATH
-    )
-
-    with open(
-        LABELS_PATH,
-        "r"
-    ) as f:
-
-        label_map = json.load(f)
-
-    # JSON converts keys to string
-    label_map = {
-        int(k): v
-        for k, v in label_map.items()
-    }
-
-    print(
-        "[MODEL LOADED]",
-        flush=True
-    )
-
-    print(
-        f"[LABEL MAP] {label_map}",
-        flush=True
-    )
-
-    return recognizer, label_map
+    return best_usn, best_score
 
 
 # =========================
 # RECOGNIZE FACE
+#
+# With expectedUsn: 1:1 verification against that
+# student only. Without it: 1:N search over everyone.
+#
+# `confidence` is a 0-100 match percentage.
+# HIGHER = BETTER.
 # =========================
 @recognize_bp.route(
     "/recognize",
@@ -115,7 +111,7 @@ def recognize():
         flush=True
     )
 
-    data = request.json
+    data = request.json or {}
 
     image_data = data.get("image")
 
@@ -135,22 +131,10 @@ def recognize():
     # =========================
     try:
 
-        img_bytes = base64.b64decode(
-            image_data.split(",")[1]
-        )
-
-        nparr = np.frombuffer(
-            img_bytes,
-            np.uint8
-        )
-
-        frame = cv2.imdecode(
-            nparr,
-            cv2.IMREAD_COLOR
-        )
+        frame = decode_color(image_data)
 
         if frame is None:
-            raise Exception()
+            raise Exception("Image could not be read")
 
     except Exception as e:
 
@@ -166,65 +150,11 @@ def recognize():
         }), 400
 
     # =========================
-    # LOAD SAVED MODEL
+    # DETECT + EMBED
     # =========================
-    try:
+    probe, box = detect_and_embed(frame)
 
-        recognizer, label_map = (
-            load_model()
-        )
-
-    except Exception as e:
-
-        print(
-            "[MODEL LOAD ERROR]",
-            str(e),
-            flush=True
-        )
-
-        return jsonify({
-            "success": False,
-            "message": str(e)
-        }), 400
-
-    # =========================
-    # FACE DETECTOR
-    # =========================
-    face_cascade = cv2.CascadeClassifier(
-        cv2.data.haarcascades +
-        "haarcascade_frontalface_alt2.xml"
-    )
-
-    gray = cv2.cvtColor(
-        frame,
-        cv2.COLOR_BGR2GRAY
-    )
-
-    # =========================
-    # NORMALIZE LIGHTING
-    # =========================
-    gray = cv2.equalizeHist(
-        gray
-    )
-
-    # =========================
-    # DETECT FACE
-    # =========================
-    detected_faces = (
-        face_cascade.detectMultiScale(
-            gray,
-            scaleFactor=1.1,
-            minNeighbors=4,
-            minSize=(80, 80)
-        )
-    )
-
-    print(
-        f"[FACE DETECTED] {len(detected_faces)}",
-        flush=True
-    )
-
-    if len(detected_faces) == 0:
+    if probe is None:
 
         return jsonify({
             "success": False,
@@ -232,24 +162,19 @@ def recognize():
         }), 400
 
     # =========================
-    # USE LARGEST FACE
-    # =========================
-    (x, y, w, h) = max(
-        detected_faces,
-        key=lambda face:
-        face[2] * face[3]
-    )
-
-    face_img = gray[
-        y:y+h,
-        x:x+w
-    ]
-
-    # =========================
     # BLUR CHECK
     # =========================
+    (x, y, w, h) = box
+
+    x, y = max(x, 0), max(y, 0)
+
+    face_gray = cv2.cvtColor(
+        frame[y:y + h, x:x + w],
+        cv2.COLOR_BGR2GRAY
+    )
+
     blur_value = cv2.Laplacian(
-        face_img,
+        face_gray,
         cv2.CV_64F
     ).var()
 
@@ -258,7 +183,7 @@ def recognize():
         flush=True
     )
 
-    if blur_value < 40:
+    if blur_value < MIN_BLUR:
 
         return jsonify({
             "success": False,
@@ -266,90 +191,84 @@ def recognize():
         }), 400
 
     # =========================
-    # PREPROCESS
+    # MATCH
     # =========================
-    face_img = cv2.resize(
-        face_img,
-        FACE_SIZE
-    )
+    if expected_usn:
 
-    face_img = cv2.equalizeHist(
-        face_img
-    )
+        face_user = find_face_user(expected_usn)
 
-    face_img = cv2.GaussianBlur(
-        face_img,
-        (3, 3),
-        0
-    )
+        if not face_user:
 
-    # =========================
-    # PREDICT
-    # =========================
-    try:
-
-        label, confidence = (
-            recognizer.predict(
-                face_img
+            print(
+                f"[NO EMBEDDINGS] {expected_usn}",
+                flush=True
             )
-        )
 
-    except Exception as e:
+            return jsonify({
+                "success": False,
+                "message":
+                "This student is not face registered"
+            }), 403
 
-        print(
-            "[PREDICT ERROR]",
-            str(e),
-            flush=True
-        )
+        predicted_usn = expected_usn
+        score = best_similarity(probe, face_user)
+
+    else:
+
+        predicted_usn, score = search_all(probe)
+
+        if predicted_usn is None:
+
+            return jsonify({
+                "success": False,
+                "message": "No registered faces"
+            }), 400
+
+        predicted_usn = str(
+            predicted_usn
+        ).strip().lower()
+
+    confidence = round(
+        max(score, 0.0) * 100,
+        2
+    )
+
+    print(
+        f"[MATCH] usn={predicted_usn} similarity={round(score, 3)} "
+        f"threshold={SAME_PERSON_THRESHOLD}",
+        flush=True
+    )
+
+    # =========================
+    # CONFIDENCE CHECK
+    # HIGHER = BETTER
+    # =========================
+    if score < SAME_PERSON_THRESHOLD:
+
+        if expected_usn:
+
+            return jsonify({
+                "success": False,
+                "message":
+                "Face does not match the registered face of this account",
+                "confidence": confidence
+            }), 403
 
         return jsonify({
             "success": False,
-            "message": "Prediction failed"
-        }), 500
-
-    # =========================
-    # UNKNOWN LABEL
-    # =========================
-    if label not in label_map:
-
-        print(
-            f"[UNKNOWN LABEL] {label}",
-            flush=True
-        )
-
-        return jsonify({
-            "success": False,
-            "message": "Unknown face label"
-        }), 400
-
-    predicted_usn = str(
-        label_map[label]
-    ).strip().lower()
-
-    # =========================
-    # MUST BE THE ACCOUNT OWNER
-    # =========================
-    if expected_usn and predicted_usn != expected_usn:
-
-        print(
-            f"[IDENTITY MISMATCH] predicted={predicted_usn} expected={expected_usn}",
-            flush=True
-        )
-
-        return jsonify({
-            "success": False,
-            "message":
-            "Face does not match the registered face of this account"
-        }), 403
+            "message": "Face not recognized",
+            "confidence": confidence
+        }), 401
 
     # =========================
     # CHECK USER IN DATABASE
     # =========================
-    registered_user = (
-        users_collection.find_one({
-            "studentId": predicted_usn
-        })
-    )
+    registered_user = users_collection.find_one({
+        "studentId": {
+            "$regex": f"^{re.escape(predicted_usn)}$",
+            "$options": "i"
+        }
+    })
 
     if not registered_user:
 
@@ -364,9 +283,6 @@ def recognize():
             "This student is not registered"
         }), 404
 
-    # =========================
-    # CHECK FACE REGISTERED
-    # =========================
     if not registered_user.get(
         "isFaceRegistered",
         False
@@ -384,54 +300,6 @@ def recognize():
         }), 403
 
     # =========================
-    # FINAL DEBUG
-    # =========================
-    print(
-        "================================",
-        flush=True
-    )
-
-    print(
-        f"[LABEL] {label}",
-        flush=True
-    )
-
-    print(
-        f"[PREDICTED USN] {predicted_usn}",
-        flush=True
-    )
-
-    print(
-        f"[CONFIDENCE] {confidence}",
-        flush=True
-    )
-
-    print(
-        f"[LABEL MAP] {label_map}",
-        flush=True
-    )
-
-    print(
-        "================================",
-        flush=True
-    )
-
-    # =========================
-    # CONFIDENCE CHECK
-    # LOWER = BETTER
-    # =========================
-    if confidence > RECOGNITION_THRESHOLD:
-
-        return jsonify({
-            "success": False,
-            "message": "Face not recognized",
-            "confidence": round(
-                confidence,
-                2
-            )
-        }), 401
-
-    # =========================
     # SUCCESS
     # =========================
     return jsonify({
@@ -440,9 +308,6 @@ def recognize():
 
         "usn": predicted_usn,
 
-        "confidence": round(
-            confidence,
-            2
-        )
+        "confidence": confidence
 
     }), 200
