@@ -30,6 +30,9 @@ MIN_BLUR = float(
     os.environ.get("FACE_MIN_BLUR", 40)
 )
 
+# Same size enrollment stores faces at
+BLUR_FACE_SIZE = (200, 200)
+
 
 # =========================
 # FIND FACE USER
@@ -152,7 +155,7 @@ def recognize():
     # =========================
     # DETECT + EMBED
     # =========================
-    probe, box = detect_and_embed(frame)
+    probe, face_crop = detect_and_embed(frame)
 
     if probe is None:
 
@@ -164,13 +167,13 @@ def recognize():
     # =========================
     # BLUR CHECK
     # =========================
-    (x, y, w, h) = box
-
-    x, y = max(x, 0), max(y, 0)
-
-    face_gray = cv2.cvtColor(
-        frame[y:y + h, x:x + w],
-        cv2.COLOR_BGR2GRAY
+    # Measured at a fixed size: Laplacian variance drops
+    # as resolution rises, so a sharp 12MP selfie would
+    # otherwise score as blurry.
+    face_gray = cv2.resize(
+        cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY),
+        BLUR_FACE_SIZE,
+        interpolation=cv2.INTER_AREA
     )
 
     blur_value = cv2.Laplacian(
