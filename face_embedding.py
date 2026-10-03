@@ -1,5 +1,6 @@
 import os
 import base64
+import time
 import urllib.request
 
 import cv2
@@ -85,9 +86,34 @@ def download_models():
         if os.path.exists(path):
             continue
 
-        print(f"[MODEL DOWNLOAD] {url}", flush=True)
+        # GitHub's LFS redirect sometimes returns 502/504,
+        # so retry with backoff instead of failing the build.
+        # Download to a temp file so a partial file is never
+        # mistaken for a finished model.
+        tmp_path = path + ".part"
 
-        urllib.request.urlretrieve(url, path)
+        for attempt in range(1, 6):
+
+            print(
+                f"[MODEL DOWNLOAD] {url} (attempt {attempt})",
+                flush=True
+            )
+
+            try:
+                urllib.request.urlretrieve(url, tmp_path)
+                os.replace(tmp_path, path)
+                break
+
+            except Exception as error:
+                print(f"[MODEL DOWNLOAD] failed: {error}", flush=True)
+
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+
+                if attempt == 5:
+                    raise
+
+                time.sleep(attempt * 5)
 
 
 def _load():
